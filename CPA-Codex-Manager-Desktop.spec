@@ -6,7 +6,7 @@ from pathlib import Path
 
 project_root = Path.cwd()
 block_cipher = None
-app_name = "CPA Codex Manager"
+app_name = "CPA-Codex-Manager"
 macos_icon = project_root / "assets" / "macOS" / "AppIcon.icns"
 if not macos_icon.exists():
     macos_icon = project_root / "assets" / "icon.icns"
@@ -21,6 +21,7 @@ datas = [
 ]
 
 hiddenimports = [
+    "aiohttp",
     "webview",
     "uvicorn",
     "uvicorn.logging",

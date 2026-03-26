@@ -1,10 +1,12 @@
 @echo off
+rem 强制切换到 UTF-8 代码页，避免 PowerShell/cmd 调用时中文提示乱码
+chcp 65001 >nul
 setlocal enabledelayedexpansion
 
 set "PROJECT_ROOT=%~dp0.."
 for %%I in ("%PROJECT_ROOT%") do set "PROJECT_ROOT=%%~fI"
 
-set "APP_NAME=CPA Codex Manager"
+set "APP_NAME=CPA-Codex-Manager"
 set "DIST_DIR=%PROJECT_ROOT%\dist"
 set "BUILD_DIR=%PROJECT_ROOT%\build"
 set "SPEC_FILE=%PROJECT_ROOT%\CPA-Codex-Manager-Desktop.spec"
@@ -37,7 +39,7 @@ if not exist "%ICON_ICO%" (
   if defined ICON_SOURCE (
     echo 未找到 assets\icon.ico，尝试根据图标源文件自动生成...
     py -3 -c "from PIL import Image" >nul 2>&1 || py -3 -m pip install pillow
-    py -3 "%PROJECT_ROOT%\scripts\generate_windows_icon.py" "%ICON_SOURCE%" "%ICON_ICO%"
+    py -3 "%PROJECT_ROOT%\scripts\generate_windows_icon.py" "!ICON_SOURCE!" "%ICON_ICO%"
   ) else (
     echo 未找到 assets\icon.ico / icon.jpg / icon.png，将使用默认 EXE 图标。
   )

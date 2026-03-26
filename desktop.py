@@ -80,7 +80,7 @@ def main():
     server_thread.start()
     _wait_for_server(host, port)
 
-    window_title = os.environ.get("APP_WINDOW_TITLE", "CPA Codex Manager")
+    window_title = os.environ.get("APP_WINDOW_TITLE", "CPA-Codex-Manager")
     url = f"http://{host}:{port}"
     logger.info("桌面版已启动: %s", url)
 

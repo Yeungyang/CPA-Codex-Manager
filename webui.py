@@ -31,6 +31,7 @@ def _get_runtime_dirs() -> tuple[Path, Path]:
     - 开发模式：项目根目录下的 data/、logs/
     - 打包模式：
       - macOS：~/Library/Application Support/CPA-Codex-Manager/
+      - Windows：%LOCALAPPDATA%/CPA-Codex-Manager/
       - 其它平台：可执行文件同级目录
     """
     if not getattr(sys, 'frozen', False):
@@ -39,6 +40,14 @@ def _get_runtime_dirs() -> tuple[Path, Path]:
     if platform.system() == "Darwin":
         app_support = Path.home() / "Library" / "Application Support" / "CPA-Codex-Manager"
         return app_support / "data", app_support / "logs"
+
+    if platform.system() == "Windows":
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        if local_app_data:
+            app_root = Path(local_app_data) / "CPA-Codex-Manager"
+        else:
+            app_root = Path.home() / "AppData" / "Local" / "CPA-Codex-Manager"
+        return app_root / "data", app_root / "logs"
 
     return project_root / "data", project_root / "logs"
 
