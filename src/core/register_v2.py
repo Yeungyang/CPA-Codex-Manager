@@ -13,6 +13,7 @@ from ..database import crud
 from ..database.session import get_db
 from .registration_result import RegistrationResult
 from .openai.chatgpt_client_v2 import ChatGPTClient
+from .openai.oauth_token_bridge import OAuthTokenBridge
 from .openai.chatgpt_flow_utils import (
     generate_random_birthday,
     generate_random_name,
@@ -353,6 +354,48 @@ class RegistrationEngineV2:
                             "registration_engine": "v2",
                             "browser_mode": self.browser_mode,
                         }
+                        try:
+                            self._log("[阶段 9] 正在补全 OAuth Token 套件...")
+                            oauth_bridge = OAuthTokenBridge(
+                                proxy_url=self.proxy_url,
+                                log_fn=lambda message: self._log(message),
+                            )
+                            oauth_result = oauth_bridge.complete_after_registration(
+                                email=result.email,
+                                password=pwd,
+                                first_name=first_name,
+                                last_name=last_name,
+                                birthdate=birthdate,
+                                email_adapter=email_adapter,
+                            )
+                            if oauth_result.success:
+                                if oauth_result.refresh_token:
+                                    result.refresh_token = oauth_result.refresh_token
+                                if oauth_result.id_token:
+                                    result.id_token = oauth_result.id_token
+                                if oauth_result.account_id and not result.account_id:
+                                    result.account_id = oauth_result.account_id
+                                if oauth_result.workspace_id and not result.workspace_id:
+                                    result.workspace_id = oauth_result.workspace_id
+                                result.metadata["oauth_token_completed"] = True
+                                result.metadata["oauth_expires_in"] = oauth_result.expires_in
+                                if oauth_result.user_id:
+                                    result.metadata["oauth_user_id"] = oauth_result.user_id
+                                if oauth_result.raw_token:
+                                    result.metadata["oauth_raw_token"] = {
+                                        "token_type": oauth_result.raw_token.get("token_type", ""),
+                                        "expires_in": oauth_result.raw_token.get("expires_in", 0),
+                                        "scope": oauth_result.raw_token.get("scope", ""),
+                                    }
+                                self._log("[阶段 9] OAuth Token 补全成功", "success")
+                            else:
+                                result.metadata["oauth_token_completed"] = False
+                                result.metadata["oauth_token_error"] = oauth_result.error_message
+                                self._log(f"OAuth Token 补全失败，保留现有会话令牌链路: {oauth_result.error_message}", "warning")
+                        except Exception as oauth_error:
+                            result.metadata["oauth_token_completed"] = False
+                            result.metadata["oauth_token_error"] = str(oauth_error)
+                            self._log(f"OAuth Token 补全异常，保留现有会话令牌链路: {oauth_error}", "warning")
                         self._log("-" * 40)
                         self._log("注册: 流程执行成功", "success")
                         self._log(f"邮箱账户: {result.email}")
