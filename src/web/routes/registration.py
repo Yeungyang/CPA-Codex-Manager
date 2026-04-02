@@ -21,7 +21,8 @@ from ...database import crud
 from ...database.session import get_db
 from ...database.models import RegistrationTask, Proxy
 from ...core.registration_result import RegistrationResult
-from ...core.register_v2 import RegistrationEngineV2 as RegistrationEngine
+from ...core.register_v2 import RegistrationEngineV2
+from ...core.register_auto import AutoStyleRegistrationEngine
 from ...services import EmailServiceFactory, EmailServiceType
 from ...config.settings import get_settings
 from ..task_manager import task_manager
@@ -84,6 +85,7 @@ async def get_active_monitoring_tasks():
 class RegistrationTaskCreate(BaseModel):
     """创建注册任务请求"""
     email_service_type: str = "tempmail"
+    engine_mode: str = "v2"
     proxy: Optional[str] = None
     email_service_config: Optional[dict] = None
     email_service_id: Optional[int] = None
@@ -99,6 +101,7 @@ class BatchRegistrationRequest(BaseModel):
     """批量注册请求"""
     count: int = 1
     email_service_type: str = "tempmail"
+    engine_mode: str = "v2"
     proxy: Optional[str] = None
     email_service_config: Optional[dict] = None
     email_service_id: Optional[int] = None
@@ -197,7 +200,7 @@ def _get_task_logs_text(task_uuid: str) -> str:
     return "\n".join(logs) if logs else ""
 
 
-def _run_sync_registration_task(task_uuid: str, email_service_type: str, proxy: Optional[str], email_service_config: Optional[dict], email_service_id: Optional[int] = None, log_prefix: str = "", batch_id: str = "", auto_upload_cpa: bool = False, cpa_service_ids: List[int] = None, auto_upload_sub2api: bool = False, sub2api_service_ids: List[int] = None, auto_upload_tm: bool = False, tm_service_ids: List[int] = None):
+def _run_sync_registration_task(task_uuid: str, email_service_type: str, engine_mode: str, proxy: Optional[str], email_service_config: Optional[dict], email_service_id: Optional[int] = None, log_prefix: str = "", batch_id: str = "", auto_upload_cpa: bool = False, cpa_service_ids: List[int] = None, auto_upload_sub2api: bool = False, sub2api_service_ids: List[int] = None, auto_upload_tm: bool = False, tm_service_ids: List[int] = None):
     """
     在线程池中执行的同步注册任务
 
@@ -289,7 +292,9 @@ def _run_sync_registration_task(task_uuid: str, email_service_type: str, proxy: 
         email_service = EmailServiceFactory.create(service_type, config)
         log_callback = task_manager.create_log_callback(task_uuid, prefix=log_prefix, batch_id=batch_id)
 
-        engine = RegistrationEngine(
+        engine_cls = RegistrationEngineV2 if engine_mode == "v2" else AutoStyleRegistrationEngine
+        log_callback(f"[系统] 当前注册引擎: {engine_mode}")
+        engine = engine_cls(
             email_service=email_service,
             proxy_url=actual_proxy_url,
             callback_logger=log_callback,
@@ -405,7 +410,7 @@ def _run_sync_registration_task(task_uuid: str, email_service_type: str, proxy: 
             pass
 
 
-async def run_registration_task(task_uuid: str, email_service_type: str, proxy: Optional[str], email_service_config: Optional[dict], email_service_id: Optional[int] = None, log_prefix: str = "", batch_id: str = "", auto_upload_cpa: bool = False, cpa_service_ids: List[int] = None, auto_upload_sub2api: bool = False, sub2api_service_ids: List[int] = None, auto_upload_tm: bool = False, tm_service_ids: List[int] = None):
+async def run_registration_task(task_uuid: str, email_service_type: str, engine_mode: str, proxy: Optional[str], email_service_config: Optional[dict], email_service_id: Optional[int] = None, log_prefix: str = "", batch_id: str = "", auto_upload_cpa: bool = False, cpa_service_ids: List[int] = None, auto_upload_sub2api: bool = False, sub2api_service_ids: List[int] = None, auto_upload_tm: bool = False, tm_service_ids: List[int] = None):
     """
     异步执行注册任务
 
@@ -427,6 +432,7 @@ async def run_registration_task(task_uuid: str, email_service_type: str, proxy: 
             _run_sync_registration_task,
             task_uuid,
             email_service_type,
+            engine_mode,
             proxy,
             email_service_config,
             email_service_id,
@@ -618,6 +624,7 @@ async def run_batch_parallel(
     batch_id: str,
     task_uuids: List[str],
     email_service_type: str,
+    engine_mode: str,
     proxy: Optional[str],
     email_service_config: Optional[dict],
     email_service_id: Optional[int],
@@ -649,7 +656,7 @@ async def run_batch_parallel(
                 
                 # 执行任务
                 await run_registration_task(
-                    uuid, email_service_type, proxy, email_service_config, email_service_id,
+                    uuid, email_service_type, engine_mode, proxy, email_service_config, email_service_id,
                     log_prefix=prefix, batch_id=batch_id,
                     auto_upload_cpa=auto_upload_cpa, cpa_service_ids=cpa_service_ids or [],
                     auto_upload_sub2api=auto_upload_sub2api, sub2api_service_ids=sub2api_service_ids or [],
@@ -737,6 +744,7 @@ async def run_batch_pipeline(
     batch_id: str,
     task_uuids: List[str],
     email_service_type: str,
+    engine_mode: str,
     proxy: Optional[str],
     email_service_config: Optional[dict],
     email_service_id: Optional[int],
@@ -763,7 +771,7 @@ async def run_batch_pipeline(
     async def _run_and_release(idx: int, uuid: str, pfx: str):
         try:
             await run_registration_task(
-                uuid, email_service_type, proxy, email_service_config, email_service_id,
+                uuid, email_service_type, engine_mode, proxy, email_service_config, email_service_id,
                 log_prefix=pfx, batch_id=batch_id,
                 auto_upload_cpa=auto_upload_cpa, cpa_service_ids=cpa_service_ids or [],
                 auto_upload_sub2api=auto_upload_sub2api, sub2api_service_ids=sub2api_service_ids or [],
@@ -859,6 +867,7 @@ async def run_batch_registration(
     batch_id: str,
     task_uuids: List[str],
     email_service_type: str,
+    engine_mode: str,
     proxy: Optional[str],
     email_service_config: Optional[dict],
     email_service_id: Optional[int],
@@ -876,7 +885,7 @@ async def run_batch_registration(
     """根据 mode 分发到并行或流水线执行"""
     if mode == "parallel":
         await run_batch_parallel(
-            batch_id, task_uuids, email_service_type, proxy,
+            batch_id, task_uuids, email_service_type, engine_mode, proxy,
             email_service_config, email_service_id, concurrency,
             auto_upload_cpa=auto_upload_cpa, cpa_service_ids=cpa_service_ids,
             auto_upload_sub2api=auto_upload_sub2api, sub2api_service_ids=sub2api_service_ids,
@@ -884,7 +893,7 @@ async def run_batch_registration(
         )
     else:
         await run_batch_pipeline(
-            batch_id, task_uuids, email_service_type, proxy,
+            batch_id, task_uuids, email_service_type, engine_mode, proxy,
             email_service_config, email_service_id,
             interval_min, interval_max, concurrency,
             auto_upload_cpa=auto_upload_cpa, cpa_service_ids=cpa_service_ids,
@@ -897,6 +906,7 @@ async def prepare_and_run_batch_registration(
     batch_id: str,
     count: int,
     email_service_type: str,
+    engine_mode: str,
     proxy: Optional[str],
     email_service_config: Optional[dict],
     email_service_id: Optional[int],
@@ -956,6 +966,7 @@ async def prepare_and_run_batch_registration(
             batch_id,
             task_uuids,
             email_service_type,
+            engine_mode,
             proxy,
             email_service_config,
             email_service_id,
@@ -1000,6 +1011,8 @@ async def start_registration(
             status_code=400,
             detail=f"无效的邮箱服务类型: {request.email_service_type}"
         )
+    if request.engine_mode not in ("v2", "legacy_auto"):
+        raise HTTPException(status_code=400, detail="注册引擎必须为 v2 或 legacy_auto")
 
     # 创建任务
     task_uuid = str(uuid.uuid4())
@@ -1016,6 +1029,7 @@ async def start_registration(
         run_registration_task,
         task_uuid,
         request.email_service_type,
+        request.engine_mode,
         request.proxy,
         request.email_service_config,
         request.email_service_id,
@@ -1057,6 +1071,8 @@ async def start_batch_registration(
             status_code=400,
             detail=f"无效的邮箱服务类型: {request.email_service_type}"
         )
+    if request.engine_mode not in ("v2", "legacy_auto"):
+        raise HTTPException(status_code=400, detail="注册引擎必须为 v2 或 legacy_auto")
 
     if request.interval_min < 0 or request.interval_max < request.interval_min:
         raise HTTPException(status_code=400, detail="间隔时间参数无效")
@@ -1088,6 +1104,7 @@ async def start_batch_registration(
         batch_id,
         request.count,
         request.email_service_type,
+        request.engine_mode,
         request.proxy,
         request.email_service_config,
         request.email_service_id,
