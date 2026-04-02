@@ -2,9 +2,11 @@
 OAuth token completion for the V2 registration flow.
 """
 
+import base64
 import json
 import logging
-import secrets
+import time
+import uuid
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
 from urllib.parse import parse_qs, urlencode, urlparse
@@ -13,12 +15,9 @@ from curl_cffi import requests as curl_requests
 
 from ...config.settings import get_settings
 from .chatgpt_flow_utils import (
-    build_browser_headers,
     decode_jwt_payload,
-    extract_flow_state,
     generate_datadog_trace,
     generate_pkce,
-    seed_oai_device_cookie,
 )
 from .sentinel_token_v2 import build_sentinel_token
 
@@ -27,10 +26,36 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.7103.114 Safari/537.36"
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 )
-DEFAULT_SEC_CH_UA = '"Chromium";v="136", "Google Chrome";v="136", "Not.A/Brand";v="99"'
+DEFAULT_SEC_CH_UA = '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"'
 AUTH_BASE = "https://auth.openai.com"
+COMMON_HEADERS = {
+    "accept": "application/json",
+    "accept-language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+    "content-type": "application/json",
+    "origin": AUTH_BASE,
+    "user-agent": DEFAULT_USER_AGENT,
+    "sec-ch-ua": DEFAULT_SEC_CH_UA,
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Windows"',
+    "sec-fetch-dest": "empty",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-site": "same-origin",
+}
+NAVIGATE_HEADERS = {
+    "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "accept-language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+    "user-agent": DEFAULT_USER_AGENT,
+    "sec-ch-ua": DEFAULT_SEC_CH_UA,
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Windows"',
+    "sec-fetch-dest": "document",
+    "sec-fetch-mode": "navigate",
+    "sec-fetch-site": "same-origin",
+    "sec-fetch-user": "?1",
+    "upgrade-insecure-requests": "1",
+}
 
 
 @dataclass
@@ -69,42 +94,28 @@ class OAuthTokenBridge:
         session = curl_requests.Session(impersonate="chrome136")
         if self.proxy_url:
             session.proxies = {"http": self.proxy_url, "https": self.proxy_url}
-        session.headers.update(
-            {
-                "User-Agent": DEFAULT_USER_AGENT,
-                "Accept-Language": "en-US,en;q=0.9",
-                "sec-ch-ua": DEFAULT_SEC_CH_UA,
-                "sec-ch-ua-mobile": "?0",
-                "sec-ch-ua-platform": '"Windows"',
-            }
-        )
         return session
 
-    def _headers(
-        self,
-        url: str,
-        *,
-        accept: str,
-        referer: Optional[str] = None,
-        origin: Optional[str] = None,
-        content_type: Optional[str] = None,
-        navigation: bool = False,
-        fetch_site: Optional[str] = None,
-        extra_headers: Optional[Dict[str, str]] = None,
-    ) -> Dict[str, str]:
-        return build_browser_headers(
-            url=url,
-            user_agent=DEFAULT_USER_AGENT,
-            sec_ch_ua=DEFAULT_SEC_CH_UA,
-            accept=accept,
-            accept_language="en-US,en;q=0.9",
-            referer=referer,
-            origin=origin,
-            content_type=content_type,
-            navigation=navigation,
-            fetch_site=fetch_site,
-            extra_headers=extra_headers,
-        )
+    def _seed_device_cookie(self, session, device_id: str) -> None:
+        session.cookies.set("oai-did", device_id, domain=".auth.openai.com")
+
+    def _build_headers(self, session, device_id: str, referer: str, with_sentinel: bool = False, flow: str = "") -> Dict[str, str]:
+        headers = dict(COMMON_HEADERS)
+        headers["referer"] = referer
+        headers["oai-device-id"] = device_id
+        headers.update(generate_datadog_trace())
+        if with_sentinel:
+            token = build_sentinel_token(
+                session,
+                device_id,
+                flow=flow or "authorize_continue",
+                user_agent=DEFAULT_USER_AGENT,
+                sec_ch_ua=DEFAULT_SEC_CH_UA,
+                impersonate="chrome136",
+            )
+            if token:
+                headers["openai-sentinel-token"] = token
+        return headers
 
     def _extract_code_from_url(self, url: str) -> str:
         if not url or "code=" not in url:
@@ -120,17 +131,7 @@ class OAuthTokenBridge:
             if not current_url:
                 return ""
             try:
-                response = session.get(
-                    current_url,
-                    headers=self._headers(
-                        current_url,
-                        accept="text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                        referer=AUTH_BASE,
-                        navigation=True,
-                    ),
-                    timeout=30,
-                    allow_redirects=False,
-                )
+                response = session.get(current_url, headers=NAVIGATE_HEADERS, timeout=30, allow_redirects=False)
             except Exception as exc:
                 return self._extract_code_from_url(str(exc))
 
@@ -164,6 +165,16 @@ class OAuthTokenBridge:
             except Exception:
                 continue
         return {}
+
+    def _extract_code_from_exception(self, exc: Exception) -> str:
+        text = str(exc)
+        start = text.find("http://localhost")
+        if start == -1:
+            start = text.find("https://localhost")
+        if start == -1:
+            return ""
+        candidate = text[start:].split()[0].strip('\'"')
+        return self._extract_code_from_url(candidate)
 
     def _post_token_exchange(self, session, code: str, code_verifier: str) -> OAuthCompletionResult:
         token_url = self.settings.openai_token_url
@@ -236,8 +247,8 @@ class OAuthTokenBridge:
     ) -> OAuthCompletionResult:
         """注册成功后，用独立 OAuth 登录流程补全 refresh_token。"""
         session = self._create_session()
-        device_id = secrets.token_hex(16)
-        seed_oai_device_cookie(session, device_id)
+        device_id = str(uuid.uuid4())
+        self._seed_device_cookie(session, device_id)
 
         code_verifier, code_challenge = generate_pkce()
         state = secrets.token_urlsafe(32)
@@ -252,70 +263,42 @@ class OAuthTokenBridge:
                     "code_challenge": code_challenge,
                     "code_challenge_method": "S256",
                     "state": state,
-                    "prompt": "login",
-                    "id_token_add_organizations": "true",
-                    "codex_cli_simplified_flow": "true",
                 }
             )
         )
 
         try:
             self._log("[OAuth补全] 正在初始化独立授权会话...")
-            session.get(
-                authorize_url,
-                headers=self._headers(
-                    authorize_url,
-                    accept="text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                    navigation=True,
-                ),
-                allow_redirects=True,
-                timeout=30,
-            )
+            session.get(authorize_url, headers=NAVIGATE_HEADERS, allow_redirects=True, timeout=30)
 
             self._log("[OAuth补全] 正在提交登录邮箱...")
             email_url = f"{AUTH_BASE}/api/accounts/authorize/continue"
             email_resp = session.post(
                 email_url,
                 json={"username": {"kind": "email", "value": email}},
-                headers={
-                    **self._headers(
-                        email_url,
-                        accept="application/json",
-                        referer=f"{AUTH_BASE}/log-in",
-                        origin=AUTH_BASE,
-                        content_type="application/json",
-                        fetch_site="same-origin",
-                        extra_headers={"oai-device-id": device_id},
-                    ),
-                    **generate_datadog_trace(),
-                },
+                headers=self._build_headers(session, device_id, f"{AUTH_BASE}/log-in", True, "authorize_continue"),
                 timeout=30,
             )
             if email_resp.status_code != 200:
-                return OAuthCompletionResult(success=False, error_message=f"OAuth 登录提交邮箱失败: HTTP {email_resp.status_code}")
+                return OAuthCompletionResult(
+                    success=False,
+                    error_message=f"OAuth 登录提交邮箱失败: HTTP {email_resp.status_code}: {email_resp.text[:200]}",
+                )
 
             self._log("[OAuth补全] 正在提交登录密码...")
             password_url = f"{AUTH_BASE}/api/accounts/password/verify"
             password_resp = session.post(
                 password_url,
                 json={"password": password},
-                headers={
-                    **self._headers(
-                        password_url,
-                        accept="application/json",
-                        referer=f"{AUTH_BASE}/log-in/password",
-                        origin=AUTH_BASE,
-                        content_type="application/json",
-                        fetch_site="same-origin",
-                        extra_headers={"oai-device-id": device_id},
-                    ),
-                    **generate_datadog_trace(),
-                },
+                headers=self._build_headers(session, device_id, f"{AUTH_BASE}/log-in/password", True, "password_verify"),
                 timeout=30,
                 allow_redirects=False,
             )
             if password_resp.status_code != 200:
-                return OAuthCompletionResult(success=False, error_message=f"OAuth 登录密码验证失败: HTTP {password_resp.status_code}")
+                return OAuthCompletionResult(
+                    success=False,
+                    error_message=f"OAuth 登录密码验证失败: HTTP {password_resp.status_code}: {password_resp.text[:200]}",
+                )
 
             try:
                 data = password_resp.json()
@@ -337,22 +320,14 @@ class OAuthTokenBridge:
                 otp_resp = session.post(
                     otp_url,
                     json={"code": otp_code},
-                    headers={
-                        **self._headers(
-                            otp_url,
-                            accept="application/json",
-                            referer=f"{AUTH_BASE}/email-verification",
-                            origin=AUTH_BASE,
-                            content_type="application/json",
-                            fetch_site="same-origin",
-                            extra_headers={"oai-device-id": device_id},
-                        ),
-                        **generate_datadog_trace(),
-                    },
+                    headers=self._build_headers(session, device_id, f"{AUTH_BASE}/email-verification"),
                     timeout=30,
                 )
                 if otp_resp.status_code != 200:
-                    return OAuthCompletionResult(success=False, error_message=f"OAuth 登录二次邮箱验证失败: HTTP {otp_resp.status_code}")
+                    return OAuthCompletionResult(
+                        success=False,
+                        error_message=f"OAuth 登录二次邮箱验证失败: HTTP {otp_resp.status_code}: {otp_resp.text[:200]}",
+                    )
 
                 try:
                     data = otp_resp.json()
@@ -364,45 +339,23 @@ class OAuthTokenBridge:
 
                 if continue_url and "about-you" in continue_url:
                     about_url = f"{AUTH_BASE}/about-you"
-                    about_resp = session.get(
-                        about_url,
-                        headers=self._headers(
-                            about_url,
-                            accept="text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                            referer=f"{AUTH_BASE}/email-verification",
-                            navigation=True,
-                        ),
-                        timeout=30,
-                        allow_redirects=True,
-                    )
+                    about_headers = dict(NAVIGATE_HEADERS)
+                    about_headers["referer"] = f"{AUTH_BASE}/email-verification"
+                    about_resp = session.get(about_url, headers=about_headers, timeout=30, allow_redirects=True)
 
                     final_about_url = str(about_resp.url)
                     if "consent" in final_about_url or "organization" in final_about_url:
                         continue_url = final_about_url
                     else:
-                        sentinel = build_sentinel_token(
+                        create_url = f"{AUTH_BASE}/api/accounts/create_account"
+                        create_headers = self._build_headers(session, device_id, about_url)
+                        create_headers["openai-sentinel-token"] = build_sentinel_token(
                             session,
                             device_id,
-                            flow="authorize_continue",
                             user_agent=DEFAULT_USER_AGENT,
                             sec_ch_ua=DEFAULT_SEC_CH_UA,
                             impersonate="chrome136",
                         )
-                        create_url = f"{AUTH_BASE}/api/accounts/create_account"
-                        create_headers = {
-                            **self._headers(
-                                create_url,
-                                accept="application/json",
-                                referer=about_url,
-                                origin=AUTH_BASE,
-                                content_type="application/json",
-                                fetch_site="same-origin",
-                                extra_headers={"oai-device-id": device_id},
-                            ),
-                            **generate_datadog_trace(),
-                        }
-                        if sentinel:
-                            create_headers["openai-sentinel-token"] = sentinel
                         create_resp = session.post(
                             create_url,
                             json={"name": f"{first_name} {last_name}", "birthdate": birthdate},
@@ -429,23 +382,16 @@ class OAuthTokenBridge:
 
             self._log("[OAuth补全] 正在推进 consent / workspace / organization 链路...")
             auth_code = ""
-            consent_resp = session.get(
-                consent_url,
-                headers=self._headers(
-                    consent_url,
-                    accept="text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                    referer=AUTH_BASE,
-                    navigation=True,
-                ),
-                timeout=30,
-                allow_redirects=False,
-            )
-            if consent_resp.status_code in {301, 302, 303, 307, 308}:
-                redirect_url = str(consent_resp.headers.get("Location") or "").strip()
-                auth_code = self._extract_code_from_url(redirect_url) or self._follow_and_extract_code(
-                    session,
-                    f"{AUTH_BASE}{redirect_url}" if redirect_url.startswith("/") else redirect_url,
-                )
+            try:
+                consent_resp = session.get(consent_url, headers=NAVIGATE_HEADERS, timeout=30, allow_redirects=False)
+                if consent_resp.status_code in {301, 302, 303, 307, 308}:
+                    redirect_url = str(consent_resp.headers.get("Location") or "").strip()
+                    auth_code = self._extract_code_from_url(redirect_url) or self._follow_and_extract_code(
+                        session,
+                        f"{AUTH_BASE}{redirect_url}" if redirect_url.startswith("/") else redirect_url,
+                    )
+            except Exception as exc:
+                auth_code = self._extract_code_from_exception(exc)
 
             if not auth_code:
                 session_data = self._decode_auth_session(session)
@@ -456,18 +402,7 @@ class OAuthTokenBridge:
                     workspace_resp = session.post(
                         workspace_url,
                         json={"workspace_id": workspace_id},
-                        headers={
-                            **self._headers(
-                                workspace_url,
-                                accept="application/json",
-                                referer=consent_url,
-                                origin=AUTH_BASE,
-                                content_type="application/json",
-                                fetch_site="same-origin",
-                                extra_headers={"oai-device-id": device_id},
-                            ),
-                            **generate_datadog_trace(),
-                        },
+                        headers={**COMMON_HEADERS, "referer": consent_url, "oai-device-id": device_id, **generate_datadog_trace()},
                         timeout=30,
                         allow_redirects=False,
                     )
@@ -494,18 +429,7 @@ class OAuthTokenBridge:
                             org_resp = session.post(
                                 org_url,
                                 json=body,
-                                headers={
-                                    **self._headers(
-                                        org_url,
-                                        accept="application/json",
-                                        referer=next_url or consent_url,
-                                        origin=AUTH_BASE,
-                                        content_type="application/json",
-                                        fetch_site="same-origin",
-                                        extra_headers={"oai-device-id": device_id},
-                                    ),
-                                    **generate_datadog_trace(),
-                                },
+                                headers={**COMMON_HEADERS, "referer": next_url or consent_url, "oai-device-id": device_id, **generate_datadog_trace()},
                                 timeout=30,
                                 allow_redirects=False,
                             )
@@ -533,23 +457,16 @@ class OAuthTokenBridge:
                             )
 
             if not auth_code:
-                fallback_resp = session.get(
-                    consent_url,
-                    headers=self._headers(
-                        consent_url,
-                        accept="text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                        referer=AUTH_BASE,
-                        navigation=True,
-                    ),
-                    timeout=30,
-                    allow_redirects=True,
-                )
-                auth_code = self._extract_code_from_url(str(fallback_resp.url))
-                if not auth_code:
-                    for history_response in fallback_resp.history:
-                        auth_code = self._extract_code_from_url(str(history_response.headers.get("Location") or "").strip())
-                        if auth_code:
-                            break
+                try:
+                    fallback_resp = session.get(consent_url, headers=NAVIGATE_HEADERS, timeout=30, allow_redirects=True)
+                    auth_code = self._extract_code_from_url(str(fallback_resp.url))
+                    if not auth_code:
+                        for history_response in fallback_resp.history:
+                            auth_code = self._extract_code_from_url(str(history_response.headers.get("Location") or "").strip())
+                            if auth_code:
+                                break
+                except Exception as exc:
+                    auth_code = self._extract_code_from_exception(exc)
 
             if not auth_code:
                 return OAuthCompletionResult(success=False, error_message="OAuth consent 链路未提取到 authorization code")
