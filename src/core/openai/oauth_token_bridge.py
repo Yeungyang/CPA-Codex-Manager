@@ -5,6 +5,7 @@ OAuth token completion for the V2 registration flow.
 import base64
 import json
 import logging
+import secrets
 import time
 import uuid
 from dataclasses import dataclass
