@@ -5,6 +5,7 @@ Auto.py style registration engine.
 import base64
 import json
 import logging
+import random
 import secrets
 import time
 import uuid
@@ -12,10 +13,8 @@ from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import parse_qs, urlencode, urlparse
 
-import requests
 import urllib3
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+from curl_cffi import requests as cffi_requests
 
 from ..config.settings import get_settings
 from ..database import crud
@@ -29,37 +28,42 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 logger = logging.getLogger(__name__)
 
 AUTH_BASE = "https://auth.openai.com"
-DEFAULT_USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-)
-DEFAULT_SEC_CH_UA = '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"'
-COMMON_HEADERS = {
-    "accept": "application/json",
-    "accept-language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
-    "content-type": "application/json",
-    "origin": AUTH_BASE,
-    "user-agent": DEFAULT_USER_AGENT,
-    "sec-ch-ua": DEFAULT_SEC_CH_UA,
-    "sec-ch-ua-mobile": "?0",
-    "sec-ch-ua-platform": '"Windows"',
-    "sec-fetch-dest": "empty",
-    "sec-fetch-mode": "cors",
-    "sec-fetch-site": "same-origin",
-}
-NAVIGATE_HEADERS = {
-    "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-    "accept-language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
-    "user-agent": DEFAULT_USER_AGENT,
-    "sec-ch-ua": DEFAULT_SEC_CH_UA,
-    "sec-ch-ua-mobile": "?0",
-    "sec-ch-ua-platform": '"Windows"',
-    "sec-fetch-dest": "document",
-    "sec-fetch-mode": "navigate",
-    "sec-fetch-site": "same-origin",
-    "sec-fetch-user": "?1",
-    "upgrade-insecure-requests": "1",
-}
+_CHROME_PROFILES = [
+    {
+        "major": 122,
+        "impersonate": "chrome122",
+        "build": 6261,
+        "patch_range": (57, 129),
+        "sec_ch_ua": '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+    },
+    {
+        "major": 131,
+        "impersonate": "chrome131",
+        "build": 6778,
+        "patch_range": (69, 205),
+        "sec_ch_ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+    },
+    {
+        "major": 133,
+        "impersonate": "chrome133a",
+        "build": 6943,
+        "patch_range": (33, 153),
+        "sec_ch_ua": '"Not(A:Brand";v="99", "Google Chrome";v="133", "Chromium";v="133"',
+    },
+    {
+        "major": 136,
+        "impersonate": "chrome136",
+        "build": 7103,
+        "patch_range": (48, 175),
+        "sec_ch_ua": '"Chromium";v="136", "Google Chrome";v="136", "Not.A/Brand";v="99"',
+    },
+]
+_LANGUAGE_PROFILES = [
+    "en-US,en;q=0.9",
+    "en-US,en;q=0.9,zh-CN;q=0.8",
+    "en,en-US;q=0.9",
+    "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+]
 
 
 class AutoStyleRegistrationEngine:
@@ -91,6 +95,50 @@ class AutoStyleRegistrationEngine:
         self.password: Optional[str] = None
         self.email_info: Optional[Dict[str, Any]] = None
         self.logs: List[str] = []
+        self._rotate_browser_profile()
+
+    def _rotate_browser_profile(self):
+        profile = random.choice(_CHROME_PROFILES)
+        patch = random.randint(*profile["patch_range"])
+        self.impersonate = profile["impersonate"]
+        self.chrome_major = profile["major"]
+        self.chrome_full = f"{profile['major']}.0.{profile['build']}.{patch}"
+        self.user_agent = (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            f"AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{self.chrome_full} Safari/537.36"
+        )
+        self.sec_ch_ua = profile["sec_ch_ua"]
+        self.accept_language = random.choice(_LANGUAGE_PROFILES)
+
+    def _common_headers(self) -> Dict[str, str]:
+        return {
+            "accept": "application/json",
+            "accept-language": self.accept_language,
+            "content-type": "application/json",
+            "origin": AUTH_BASE,
+            "user-agent": self.user_agent,
+            "sec-ch-ua": self.sec_ch_ua,
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"',
+            "sec-fetch-dest": "empty",
+            "sec-fetch-mode": "cors",
+            "sec-fetch-site": "same-origin",
+        }
+
+    def _navigate_headers(self) -> Dict[str, str]:
+        return {
+            "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "accept-language": self.accept_language,
+            "user-agent": self.user_agent,
+            "sec-ch-ua": self.sec_ch_ua,
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"',
+            "sec-fetch-dest": "document",
+            "sec-fetch-mode": "navigate",
+            "sec-fetch-site": "same-origin",
+            "sec-fetch-user": "?1",
+            "upgrade-insecure-requests": "1",
+        }
 
     def _is_cancelled(self) -> bool:
         return bool(self.check_cancelled and self.check_cancelled())
@@ -117,14 +165,9 @@ class AutoStyleRegistrationEngine:
         else:
             logger.info(message)
 
-    def _create_session(self) -> requests.Session:
-        session = requests.Session()
-        session.trust_env = False
-        session.verify = False
-        retry = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
-        adapter = HTTPAdapter(max_retries=retry)
-        session.mount("https://", adapter)
-        session.mount("http://", adapter)
+    def _create_session(self):
+        self._rotate_browser_profile()
+        session = cffi_requests.Session(impersonate=self.impersonate, timeout=30, verify=False)
         if self.proxy_url:
             session.proxies = {"http": self.proxy_url, "https": self.proxy_url}
         return session
@@ -179,8 +222,8 @@ class AutoStyleRegistrationEngine:
                 return code
         return ""
 
-    def _build_headers(self, session: requests.Session, device_id: str, referer: str, with_sentinel: bool = False, flow: str = "") -> Dict[str, str]:
-        headers = dict(COMMON_HEADERS)
+    def _build_headers(self, session, device_id: str, referer: str, with_sentinel: bool = False, flow: str = "") -> Dict[str, str]:
+        headers = self._common_headers()
         headers["referer"] = referer
         headers["oai-device-id"] = device_id
         headers.update(generate_datadog_trace())
@@ -189,8 +232,8 @@ class AutoStyleRegistrationEngine:
                 session,
                 device_id,
                 flow=flow or "authorize_continue",
-                user_agent=DEFAULT_USER_AGENT,
-                sec_ch_ua=DEFAULT_SEC_CH_UA,
+                user_agent=self.user_agent,
+                sec_ch_ua=self.sec_ch_ua,
             )
             if token:
                 headers["openai-sentinel-token"] = token
@@ -211,17 +254,15 @@ class AutoStyleRegistrationEngine:
                 return self._extract_code_from_url(text[idx:].split()[0].strip("'\""))
         return ""
 
-    def _follow_and_extract_code(self, session: requests.Session, url: str, max_depth: int = 10) -> str:
+    def _follow_and_extract_code(self, session, url: str, max_depth: int = 10) -> str:
         current_url = str(url or "").strip()
         for _ in range(max_depth):
             if not current_url:
                 return ""
             try:
-                resp = session.get(current_url, headers=NAVIGATE_HEADERS, timeout=30, allow_redirects=False)
-            except requests.exceptions.ConnectionError as exc:
+                resp = session.get(current_url, headers=self._navigate_headers(), timeout=30, allow_redirects=False)
+            except Exception as exc:
                 return self._extract_code_from_exception(exc)
-            except Exception:
-                return ""
 
             if resp.status_code in (301, 302, 303, 307, 308):
                 loc = str(resp.headers.get("Location") or "").strip()
@@ -233,7 +274,7 @@ class AutoStyleRegistrationEngine:
             return self._extract_code_from_url(str(resp.url))
         return ""
 
-    def _decode_auth_session(self, session: requests.Session) -> Dict[str, Any]:
+    def _decode_auth_session(self, session) -> Dict[str, Any]:
         for cookie in session.cookies:
             if cookie.name != "oai-client-auth-session":
                 continue
@@ -248,7 +289,7 @@ class AutoStyleRegistrationEngine:
                 continue
         return {}
 
-    def _exchange_code(self, session: requests.Session, code: str, code_verifier: str) -> Dict[str, Any]:
+    def _exchange_code(self, session, code: str, code_verifier: str) -> Dict[str, Any]:
         resp = session.post(
             self.settings.openai_token_url,
             headers={"Content-Type": "application/x-www-form-urlencoded"},
@@ -283,7 +324,7 @@ class AutoStyleRegistrationEngine:
             "screen_hint": "signup",
             "prompt": "login",
         }
-        session.get(f"{AUTH_BASE}/oauth/authorize?{urlencode(authorize_params)}", headers=NAVIGATE_HEADERS, timeout=30)
+        session.get(f"{AUTH_BASE}/oauth/authorize?{urlencode(authorize_params)}", headers=self._navigate_headers(), timeout=30)
 
         self._log("[阶段 2] 正在提交身份核验...")
         resp = session.post(
@@ -307,7 +348,7 @@ class AutoStyleRegistrationEngine:
         self._log("账号凭据配置完成")
 
         self._log("[阶段 4] 正在分发验证码...")
-        nav_headers = dict(NAVIGATE_HEADERS)
+        nav_headers = self._navigate_headers()
         nav_headers["referer"] = f"{AUTH_BASE}/create-account/password"
         session.get(f"{AUTH_BASE}/api/accounts/email-otp/send", headers=nav_headers, timeout=30)
 
@@ -329,7 +370,7 @@ class AutoStyleRegistrationEngine:
 
         self._log("[阶段 7] 正在完成账户配置...")
         headers = self._build_headers(session, device_id, f"{AUTH_BASE}/about-you")
-        headers["openai-sentinel-token"] = build_sentinel_token(session, device_id, user_agent=DEFAULT_USER_AGENT, sec_ch_ua=DEFAULT_SEC_CH_UA)
+        headers["openai-sentinel-token"] = build_sentinel_token(session, device_id, user_agent=self.user_agent, sec_ch_ua=self.sec_ch_ua)
         resp = session.post(
             f"{AUTH_BASE}/api/accounts/create_account",
             json={"name": f"{first_name} {last_name}", "birthdate": birthdate},
@@ -337,7 +378,7 @@ class AutoStyleRegistrationEngine:
             timeout=30,
         )
         if resp.status_code == 403:
-            headers["openai-sentinel-token"] = build_sentinel_token(session, device_id, user_agent=DEFAULT_USER_AGENT, sec_ch_ua=DEFAULT_SEC_CH_UA)
+            headers["openai-sentinel-token"] = build_sentinel_token(session, device_id, user_agent=self.user_agent, sec_ch_ua=self.sec_ch_ua)
             resp = session.post(
                 f"{AUTH_BASE}/api/accounts/create_account",
                 json={"name": f"{first_name} {last_name}", "birthdate": birthdate},
@@ -367,7 +408,7 @@ class AutoStyleRegistrationEngine:
             "state": secrets.token_urlsafe(32),
         }
         authorize_url = f"{AUTH_BASE}/oauth/authorize?{urlencode(authorize_params)}"
-        session.get(authorize_url, headers=NAVIGATE_HEADERS, timeout=30, allow_redirects=True)
+        session.get(authorize_url, headers=self._navigate_headers(), timeout=30, allow_redirects=True)
 
         resp = session.post(
             f"{AUTH_BASE}/api/accounts/authorize/continue",
@@ -412,7 +453,7 @@ class AutoStyleRegistrationEngine:
             page_type = str(((data.get("page") or {}).get("type")) or "").strip()
 
             if continue_url and "about-you" in continue_url:
-                about_headers = dict(NAVIGATE_HEADERS)
+                about_headers = self._navigate_headers()
                 about_headers["referer"] = f"{AUTH_BASE}/email-verification"
                 about_resp = session.get(f"{AUTH_BASE}/about-you", headers=about_headers, timeout=30, allow_redirects=True)
                 if "consent" in str(about_resp.url) or "organization" in str(about_resp.url):
@@ -440,13 +481,13 @@ class AutoStyleRegistrationEngine:
         auth_code = ""
 
         try:
-            r3 = session.get(consent_url, headers=NAVIGATE_HEADERS, timeout=30, allow_redirects=False)
+            r3 = session.get(consent_url, headers=self._navigate_headers(), timeout=30, allow_redirects=False)
             if r3.status_code in (301, 302, 303, 307, 308):
                 loc = str(r3.headers.get("Location") or "").strip()
                 auth_code = self._extract_code_from_url(loc)
                 if not auth_code:
                     auth_code = self._follow_and_extract_code(session, f"{AUTH_BASE}{loc}" if loc.startswith("/") else loc)
-        except requests.exceptions.ConnectionError as exc:
+        except Exception as exc:
             auth_code = self._extract_code_from_exception(exc)
 
         if not auth_code:
@@ -457,7 +498,7 @@ class AutoStyleRegistrationEngine:
                 ws_resp = session.post(
                     f"{AUTH_BASE}/api/accounts/workspace/select",
                     json={"workspace_id": workspace_id},
-                    headers={**COMMON_HEADERS, "referer": consent_url, "oai-device-id": device_id, **generate_datadog_trace()},
+                    headers={**self._common_headers(), "referer": consent_url, "oai-device-id": device_id, **generate_datadog_trace()},
                     timeout=30,
                     allow_redirects=False,
                 )
@@ -480,7 +521,7 @@ class AutoStyleRegistrationEngine:
                             org_resp = session.post(
                                 f"{AUTH_BASE}/api/accounts/organization/select",
                                 json=body,
-                                headers={**COMMON_HEADERS, "referer": ws_next or consent_url, "oai-device-id": device_id, **generate_datadog_trace()},
+                                headers={**self._common_headers(), "referer": ws_next or consent_url, "oai-device-id": device_id, **generate_datadog_trace()},
                                 timeout=30,
                                 allow_redirects=False,
                             )
@@ -498,14 +539,14 @@ class AutoStyleRegistrationEngine:
 
         if not auth_code:
             try:
-                fallback = session.get(consent_url, headers=NAVIGATE_HEADERS, timeout=30, allow_redirects=True)
+                fallback = session.get(consent_url, headers=self._navigate_headers(), timeout=30, allow_redirects=True)
                 auth_code = self._extract_code_from_url(str(fallback.url))
                 if not auth_code:
                     for hist in fallback.history:
                         auth_code = self._extract_code_from_url(str(hist.headers.get("Location") or "").strip())
                         if auth_code:
                             break
-            except requests.exceptions.ConnectionError as exc:
+            except Exception as exc:
                 auth_code = self._extract_code_from_exception(exc)
 
         if not auth_code:
