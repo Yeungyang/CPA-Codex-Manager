@@ -24,6 +24,7 @@ from ...core.registration_result import RegistrationResult
 from ...core.register_v2 import RegistrationEngineV2
 from ...core.register_auto import AutoStyleRegistrationEngine
 from ...core.register_legacy_oauth import LegacyOAuthRegistrationEngine
+from ...core.register_legacy_full import LegacyFullRegistrationEngine
 from ...services import EmailServiceFactory, EmailServiceType
 from ...config.settings import get_settings
 from ..task_manager import task_manager
@@ -297,6 +298,7 @@ def _run_sync_registration_task(task_uuid: str, email_service_type: str, engine_
             "v2": RegistrationEngineV2,
             "legacy_auto": AutoStyleRegistrationEngine,
             "legacy_oauth": LegacyOAuthRegistrationEngine,
+            "legacy_full": LegacyFullRegistrationEngine,
         }
         engine_cls = engine_map.get(engine_mode, RegistrationEngineV2)
         log_callback(f"[系统] 当前注册引擎: {engine_mode}")
@@ -1032,8 +1034,8 @@ async def start_registration(
             status_code=400,
             detail=f"无效的邮箱服务类型: {request.email_service_type}"
         )
-    if request.engine_mode not in ("v2", "legacy_auto", "legacy_oauth"):
-        raise HTTPException(status_code=400, detail="注册引擎必须为 v2、legacy_auto 或 legacy_oauth")
+    if request.engine_mode not in ("v2", "legacy_auto", "legacy_oauth", "legacy_full"):
+        raise HTTPException(status_code=400, detail="注册引擎必须为 v2、legacy_auto、legacy_oauth 或 legacy_full")
 
     # 创建任务
     task_uuid = str(uuid.uuid4())
@@ -1092,8 +1094,8 @@ async def start_batch_registration(
             status_code=400,
             detail=f"无效的邮箱服务类型: {request.email_service_type}"
         )
-    if request.engine_mode not in ("v2", "legacy_auto", "legacy_oauth"):
-        raise HTTPException(status_code=400, detail="注册引擎必须为 v2、legacy_auto 或 legacy_oauth")
+    if request.engine_mode not in ("v2", "legacy_auto", "legacy_oauth", "legacy_full"):
+        raise HTTPException(status_code=400, detail="注册引擎必须为 v2、legacy_auto、legacy_oauth 或 legacy_full")
 
     if request.interval_min < 0 or request.interval_max < request.interval_min:
         raise HTTPException(status_code=400, detail="间隔时间参数无效")
