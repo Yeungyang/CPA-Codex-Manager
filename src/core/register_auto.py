@@ -20,7 +20,7 @@ from ..config.settings import get_settings
 from ..database import crud
 from ..database.session import get_db
 from .registration_result import RegistrationResult
-from .openai.chatgpt_flow_utils import decode_jwt_payload, generate_datadog_trace, generate_pkce
+from .openai.chatgpt_flow_utils import decode_jwt_payload, generate_datadog_trace, generate_pkce, seed_oai_device_cookie
 from .openai.sentinel_token_v2 import build_sentinel_token
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -29,13 +29,6 @@ logger = logging.getLogger(__name__)
 
 AUTH_BASE = "https://auth.openai.com"
 _CHROME_PROFILES = [
-    {
-        "major": 122,
-        "impersonate": "chrome122",
-        "build": 6261,
-        "patch_range": (57, 129),
-        "sec_ch_ua": '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
-    },
     {
         "major": 131,
         "impersonate": "chrome131",
@@ -123,6 +116,9 @@ class AutoStyleRegistrationEngine:
             "sec-fetch-dest": "empty",
             "sec-fetch-mode": "cors",
             "sec-fetch-site": "same-origin",
+            "cache-control": "no-cache",
+            "pragma": "no-cache",
+            "priority": "u=1, i",
         }
 
     def _navigate_headers(self) -> Dict[str, str]:
@@ -170,6 +166,15 @@ class AutoStyleRegistrationEngine:
         session = cffi_requests.Session(impersonate=self.impersonate, timeout=30, verify=False)
         if self.proxy_url:
             session.proxies = {"http": self.proxy_url, "https": self.proxy_url}
+        session.headers.update(
+            {
+                "User-Agent": self.user_agent,
+                "Accept-Language": self.accept_language,
+                "sec-ch-ua": self.sec_ch_ua,
+                "sec-ch-ua-mobile": "?0",
+                "sec-ch-ua-platform": '"Windows"',
+            }
+        )
         return session
 
     def _generate_password(self) -> str:
@@ -310,7 +315,7 @@ class AutoStyleRegistrationEngine:
         self._log("[阶段 2] 正在初始化授权会话...")
         session = self._create_session()
         device_id = str(uuid.uuid4())
-        session.cookies.set("oai-did", device_id, domain=".auth.openai.com")
+        seed_oai_device_cookie(session, device_id)
 
         code_verifier, code_challenge = generate_pkce()
         authorize_params = {
@@ -340,11 +345,11 @@ class AutoStyleRegistrationEngine:
         resp = session.post(
             f"{AUTH_BASE}/api/accounts/user/register",
             json={"username": email, "password": password},
-            headers=self._build_headers(session, device_id, f"{AUTH_BASE}/create-account/password", True, "password_verify"),
+            headers=self._build_headers(session, device_id, f"{AUTH_BASE}/create-account/password", True, "username_password_create"),
             timeout=30,
         )
         if resp.status_code not in (200, 301, 302):
-            return False, f"注册密码失败: HTTP {resp.status_code}"
+            return False, f"注册密码失败 (HTTP {resp.status_code}: {resp.text[:500]})"
         self._log("账号凭据配置完成")
 
         self._log("[阶段 4] 正在分发验证码...")
@@ -370,7 +375,14 @@ class AutoStyleRegistrationEngine:
 
         self._log("[阶段 7] 正在完成账户配置...")
         headers = self._build_headers(session, device_id, f"{AUTH_BASE}/about-you")
-        headers["openai-sentinel-token"] = build_sentinel_token(session, device_id, user_agent=self.user_agent, sec_ch_ua=self.sec_ch_ua)
+        headers["openai-sentinel-token"] = build_sentinel_token(
+            session,
+            device_id,
+            flow="authorize_continue",
+            user_agent=self.user_agent,
+            sec_ch_ua=self.sec_ch_ua,
+            impersonate=self.impersonate,
+        )
         resp = session.post(
             f"{AUTH_BASE}/api/accounts/create_account",
             json={"name": f"{first_name} {last_name}", "birthdate": birthdate},
@@ -378,7 +390,14 @@ class AutoStyleRegistrationEngine:
             timeout=30,
         )
         if resp.status_code == 403:
-            headers["openai-sentinel-token"] = build_sentinel_token(session, device_id, user_agent=self.user_agent, sec_ch_ua=self.sec_ch_ua)
+            headers["openai-sentinel-token"] = build_sentinel_token(
+                session,
+                device_id,
+                flow="authorize_continue",
+                user_agent=self.user_agent,
+                sec_ch_ua=self.sec_ch_ua,
+                impersonate=self.impersonate,
+            )
             resp = session.post(
                 f"{AUTH_BASE}/api/accounts/create_account",
                 json={"name": f"{first_name} {last_name}", "birthdate": birthdate},
@@ -395,7 +414,7 @@ class AutoStyleRegistrationEngine:
         self._log("[Auto分支] 正在使用独立 OAuth 会话获取 Token...")
         session = self._create_session()
         device_id = str(uuid.uuid4())
-        session.cookies.set("oai-did", device_id, domain=".auth.openai.com")
+        seed_oai_device_cookie(session, device_id)
 
         code_verifier, code_challenge = generate_pkce()
         authorize_params = {
