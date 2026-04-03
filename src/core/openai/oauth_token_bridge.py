@@ -293,21 +293,20 @@ class OAuthTokenBridge:
             raw_token=token_data,
         )
 
-    def complete_after_registration(
+    def complete_from_authenticated_session(
         self,
         *,
-        email: str,
-        password: str,
-        first_name: str,
-        last_name: str,
-        birthdate: str,
-        email_adapter=None,
+        session,
+        device_id: str,
+        user_agent: str,
+        sec_ch_ua: str,
+        impersonate: str,
     ) -> OAuthCompletionResult:
-        """注册成功后，用独立 OAuth 登录流程补全 refresh_token。"""
-        session = self._create_session()
-        device_id = str(uuid.uuid4())
-        self._seed_device_cookie(session, device_id)
-
+        """复用已认证会话推进 OAuth consent/code exchange。"""
+        self.user_agent = user_agent
+        self.sec_ch_ua = sec_ch_ua
+        self.impersonate = impersonate
+        self.accept_language = self.accept_language or "en-US,en;q=0.9"
         code_verifier, code_challenge = generate_pkce()
         state = secrets.token_urlsafe(32)
         authorize_url = (
@@ -325,93 +324,22 @@ class OAuthTokenBridge:
             )
         )
 
-        self._log("[OAuth补全] 正在初始化独立授权会话...")
-        session.get(authorize_url, headers=self._navigate_headers(), allow_redirects=True, timeout=30)
+        self._log("[OAuth补全] 正在复用已认证会话发起 OAuth authorize...")
+        authorize_resp = session.get(authorize_url, headers=self._navigate_headers(), allow_redirects=True, timeout=30)
+        final_url = str(authorize_resp.url)
+        auth_code = self._extract_code_from_url(final_url)
+        if not auth_code and authorize_resp.history:
+            for history_response in authorize_resp.history:
+                auth_code = self._extract_code_from_url(str(history_response.headers.get("Location") or "").strip())
+                if auth_code:
+                    break
 
-        self._log("[OAuth补全] 正在提交登录邮箱...")
-        email_url = f"{AUTH_BASE}/api/accounts/authorize/continue"
-        email_resp = session.post(
-            email_url,
-            json={"username": {"kind": "email", "value": email}},
-            headers=self._build_headers(session, device_id, f"{AUTH_BASE}/log-in", True, "authorize_continue"),
-            timeout=30,
-        )
-        if email_resp.status_code != 200:
-            raise RuntimeError(f"OAuth 登录提交邮箱失败: HTTP {email_resp.status_code}: {email_resp.text[:200]}")
+        if auth_code:
+            self._log("[OAuth补全] authorize 直接返回 code，准备兑换 token...")
+            return self._post_token_exchange(session, auth_code, code_verifier)
 
-        self._log("[OAuth补全] 正在提交登录密码...")
-        password_url = f"{AUTH_BASE}/api/accounts/password/verify"
-        password_resp = session.post(
-            password_url,
-            json={"password": password},
-            headers=self._build_headers(session, device_id, f"{AUTH_BASE}/log-in/password", True, "password_verify"),
-            timeout=30,
-            allow_redirects=False,
-        )
-        if password_resp.status_code != 200:
-            raise RuntimeError(f"OAuth 登录密码验证失败: HTTP {password_resp.status_code}: {password_resp.text[:200]}")
-
-        data = password_resp.json()
-        continue_url = str(data.get("continue_url") or "").strip()
-        page_type = str(((data.get("page") or {}).get("type")) or "").strip().lower()
-
-        if page_type == "email_otp_verification" or "email-verification" in continue_url:
-            if email_adapter is None:
-                raise RuntimeError("OAuth 登录触发二次邮箱验证，但当前没有可用邮箱适配器")
-            self._log("[OAuth补全] 触发二次邮箱验证，正在等待新验证码...")
-            otp_code = email_adapter.wait_for_verification_code(email, timeout=60)
-            if not otp_code:
-                raise RuntimeError("OAuth 登录未收到二次邮箱验证码")
-
-            otp_url = f"{AUTH_BASE}/api/accounts/email-otp/validate"
-            otp_resp = session.post(
-                otp_url,
-                json={"code": otp_code},
-                headers=self._build_headers(session, device_id, f"{AUTH_BASE}/email-verification"),
-                timeout=30,
-            )
-            if otp_resp.status_code != 200:
-                raise RuntimeError(f"OAuth 登录二次邮箱验证失败: HTTP {otp_resp.status_code}: {otp_resp.text[:200]}")
-
-            data = otp_resp.json()
-            continue_url = str(data.get("continue_url") or "").strip()
-            page_type = str(((data.get("page") or {}).get("type")) or "").strip().lower()
-
-            if continue_url and "about-you" in continue_url:
-                about_url = f"{AUTH_BASE}/about-you"
-                about_headers = self._navigate_headers()
-                about_headers["referer"] = f"{AUTH_BASE}/email-verification"
-                about_resp = session.get(about_url, headers=about_headers, timeout=30, allow_redirects=True)
-
-                final_about_url = str(about_resp.url)
-                if "consent" in final_about_url or "organization" in final_about_url:
-                    continue_url = final_about_url
-                else:
-                    create_url = f"{AUTH_BASE}/api/accounts/create_account"
-                    create_headers = self._build_headers(session, device_id, about_url)
-                    create_headers["openai-sentinel-token"] = build_sentinel_token(
-                        session,
-                        device_id,
-                        user_agent=self.user_agent,
-                        sec_ch_ua=self.sec_ch_ua,
-                        impersonate=self.impersonate,
-                    )
-                    create_resp = session.post(
-                        create_url,
-                        json={"name": f"{first_name} {last_name}", "birthdate": birthdate},
-                        headers=create_headers,
-                        timeout=30,
-                    )
-                    if create_resp.status_code == 200:
-                        continue_url = str((create_resp.json() or {}).get("continue_url") or "").strip()
-
-            if "consent" in page_type and not continue_url:
-                continue_url = f"{AUTH_BASE}/sign-in-with-chatgpt/codex/consent"
-
-        consent_url = continue_url
-        if not consent_url:
-            consent_state = extract_flow_state(data, current_url=str(password_resp.url))
-            consent_url = consent_state.continue_url or consent_state.current_url
+        consent_state = extract_flow_state(current_url=final_url)
+        consent_url = consent_state.continue_url or consent_state.current_url
         if consent_url.startswith("/"):
             consent_url = f"{AUTH_BASE}{consent_url}"
         if not consent_url:

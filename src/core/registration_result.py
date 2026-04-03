@@ -11,6 +11,8 @@ class RegistrationResult:
     """注册结果"""
 
     success: bool
+    registration_success: bool = False
+    oauth_token_success: bool = False
     email: str = ""
     password: str = ""
     account_id: str = ""
@@ -27,6 +29,8 @@ class RegistrationResult:
     def to_dict(self) -> Dict[str, Any]:
         return {
             "success": self.success,
+            "registration_success": self.registration_success,
+            "oauth_token_success": self.oauth_token_success,
             "email": self.email,
             "password": self.password,
             "account_id": self.account_id,

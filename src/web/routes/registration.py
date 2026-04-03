@@ -369,6 +369,21 @@ def _run_sync_registration_task(task_uuid: str, email_service_type: str, engine_
                 )
 
             logger.info(f"注册任务完成: {task_uuid}, 邮箱: {result.email}")
+        elif result.metadata and result.metadata.get("registration_success"):
+            engine.save_to_database(result)
+            with get_db() as db:
+                update_proxy_usage(db, proxy_id)
+                crud.update_registration_task(
+                    db, task_uuid,
+                    status="failed",
+                    completed_at=datetime.utcnow(),
+                    result=result.to_dict(),
+                    error_message=result.error_message,
+                    logs=_get_task_logs_text(task_uuid),
+                )
+
+            task_manager.update_status(task_uuid, "failed", error=result.error_message, email=result.email)
+            logger.warning(f"注册主流程已成功但 OAuth 补全失败: {task_uuid}, 邮箱: {result.email}, 原因: {result.error_message}")
         else:
             with get_db() as db:
                 crud.update_registration_task(

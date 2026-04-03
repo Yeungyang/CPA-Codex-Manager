@@ -331,7 +331,7 @@ class RegistrationEngineV2:
                     session_ok, session_result = client.reuse_session_and_get_tokens()
                     if session_ok:
                         self._raise_if_cancelled()
-                        result.success = True
+                        result.registration_success = True
                         result.access_token = session_result.get("access_token", "")
                         result.session_token = session_result.get("session_token", "")
                         result.account_id = (
@@ -359,13 +359,12 @@ class RegistrationEngineV2:
                             proxy_url=self.proxy_url,
                             log_fn=lambda message: self._log(message),
                         )
-                        oauth_result = oauth_bridge.complete_after_registration(
-                            email=result.email,
-                            password=pwd,
-                            first_name=first_name,
-                            last_name=last_name,
-                            birthdate=birthdate,
-                            email_adapter=email_adapter,
+                        oauth_result = oauth_bridge.complete_from_authenticated_session(
+                            session=client.session,
+                            device_id=client.device_id,
+                            user_agent=client.ua,
+                            sec_ch_ua=client.sec_ch_ua,
+                            impersonate=client.impersonate,
                         )
                         if not oauth_result.success:
                             raise RuntimeError(oauth_result.error_message or "OAuth Token 补全失败")
@@ -387,6 +386,8 @@ class RegistrationEngineV2:
                                 "expires_in": oauth_result.raw_token.get("expires_in", 0),
                                 "scope": oauth_result.raw_token.get("scope", ""),
                             }
+                        result.oauth_token_success = True
+                        result.success = True
                         self._log("[阶段 9] OAuth Token 补全成功", "success")
                         self._log("-" * 40)
                         self._log("注册: 流程执行成功", "success")
@@ -416,6 +417,14 @@ class RegistrationEngineV2:
             if str(e) == "任务已取消":
                 self._log("注册流程已收到取消信号", "warning")
                 result.error_message = "任务已取消"
+                return result
+            if result.registration_success and not result.oauth_token_success:
+                self._log(f"注册主流程成功，但 OAuth Token 补全失败: {e}", "error")
+                result.success = False
+                result.error_message = str(e)
+                result.metadata = result.metadata or {}
+                result.metadata["registration_success"] = True
+                result.metadata["oauth_token_success"] = False
                 return result
             self._log(f"V2 注册全流程执行异常: {e}", "error")
             result.error_message = str(e)
