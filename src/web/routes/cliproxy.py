@@ -823,6 +823,7 @@ class AutoPatrolManager:
                         "invalid_401": sum_data.get("invalid_401", 0),
                         "invalid_quota": sum_data.get("invalid_quota", 0),
                         "errors": sum_data.get("errors", 0),
+                        "error_names": list(filter(None, names_errors)),
                         "cleared": cleared_count,
                         "replenish": replenish_info
                     })
@@ -834,6 +835,7 @@ class AutoPatrolManager:
                         error_names_log = f" | 异常账号: {', '.join(filter(None, names_errors))}"
 
                     final_msg = f"[{self._get_service_name(service_id)}] 自动检测扫描结束 | 有效: {ready_count}, 401: {len(names_401)}, 额度耗尽: {len(names_quota)}, 异常: {len(names_errors)} 已清理 {cleared_count} 个账号{error_names_log}{replenish_log}"
+                    task_manager.add_batch_log(batch_id, final_msg)
                     logger.info(final_msg)
 
                 self._status_map[service_id] = "idle"

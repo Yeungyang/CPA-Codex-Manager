@@ -628,6 +628,11 @@ document.addEventListener('DOMContentLoaded', () => {
                     `;
                 }
 
+                let errorNamesMsg = '';
+                if (Array.isArray(item.error_names) && item.error_names.length > 0) {
+                    errorNamesMsg = `<div style="font-size: 11px; color: var(--danger); margin-top: 4px;">异常账号: ${item.error_names.join(', ')}</div>`;
+                }
+
                 let replenishMsg = '';
                 if (item.replenish) {
                     const threadInfo = item.replenish.threads ? `${item.replenish.threads}个线程执行` : '';
@@ -642,6 +647,7 @@ document.addEventListener('DOMContentLoaded', () => {
                             <div class="notif-text">
                                 [${item.service_name || serviceName}] ${item.emergency ? '自动检测扫描异常结束' : '自动检测扫描结束'} | 
                                 ${statusInfo}
+                                ${errorNamesMsg}
                                 ${replenishMsg}
                             </div>
                         </div>
