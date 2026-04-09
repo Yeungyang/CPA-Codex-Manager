@@ -791,17 +791,6 @@ class AutoPatrolManager:
                             names=names_quota
                         ))
 
-                    # 执行 Error 动作 (新要求：异常账号也清理)
-                    if names_errors:
-                        action_batch_id = _new_batch_id("auto_action_error")
-                        task_manager.init_batch(action_batch_id, total=len(names_errors))
-                        task_manager.update_batch_status(action_batch_id, mode="cliproxy_action", monitor_visible=False)
-                        await perform_action(action_batch_id, ActionRequest(
-                            service_id=service_id,
-                            action="delete",
-                            names=names_errors
-                        ))
-                    
                     # 检查是否需要自动补货
                     replenish_log = ""
                     replenish_info = None
@@ -823,8 +812,7 @@ class AutoPatrolManager:
 
                     # 记录到持久化历史
                     cleared_count = (len(names_401) if config.action_401 == 'delete' else 0) + \
-                                    (len(names_quota) if config.action_quota == 'delete' else 0) + \
-                                    len(names_errors)
+                                    (len(names_quota) if config.action_quota == 'delete' else 0)
                     
                     history = self._history_by_service.setdefault(service_id, [])
                     history.insert(0, {
@@ -841,7 +829,11 @@ class AutoPatrolManager:
                     if len(history) > 50: history.pop()
                     self._save() # 每次成功巡检后保存历史
 
-                    final_msg = f"[{self._get_service_name(service_id)}] 自动检测扫描结束 | 有效: {ready_count}, 401: {len(names_401)}, 额度耗尽: {len(names_quota)}, 异常: {len(names_errors)} 已清理 {cleared_count} 个账号{replenish_log}"
+                    error_names_log = ""
+                    if names_errors:
+                        error_names_log = f" | 异常账号: {', '.join(filter(None, names_errors))}"
+
+                    final_msg = f"[{self._get_service_name(service_id)}] 自动检测扫描结束 | 有效: {ready_count}, 401: {len(names_401)}, 额度耗尽: {len(names_quota)}, 异常: {len(names_errors)} 已清理 {cleared_count} 个账号{error_names_log}{replenish_log}"
                     logger.info(final_msg)
 
                 self._status_map[service_id] = "idle"
